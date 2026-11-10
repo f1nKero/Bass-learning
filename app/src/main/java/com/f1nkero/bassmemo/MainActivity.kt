@@ -40,7 +40,7 @@ class MainActivity : ComponentActivity() {
         val prefs = getSharedPreferences("bassmemo", Context.MODE_PRIVATE)
         setContent {
             var tab by remember { mutableIntStateOf(0) }
-            var level by remember { mutableIntStateOf(prefs.getInt("level", 1).coerceIn(0, 3)) }
+            var level by remember { mutableIntStateOf(prefs.getInt("level", 0).coerceIn(0, 3)) }
             var correct by remember { mutableIntStateOf(prefs.getInt("correct", 0)) }
             var total by remember { mutableIntStateOf(prefs.getInt("total", 0)) }
             var streak by remember { mutableIntStateOf(0) }
@@ -48,6 +48,7 @@ class MainActivity : ComponentActivity() {
                 prefs.all.forEach { (k, v) -> if (k.startsWith("miss_") && v is Int) put(k.removePrefix("miss_"), v) }
             } }
             var selected by remember { mutableStateOf<Pos?>(null) }
+            var revealAll by remember { mutableStateOf(false) }
             var question by remember { mutableStateOf(nextQuestion(level, misses)) }
             var feedback by remember { mutableStateOf("") }
             var answered by remember { mutableStateOf(false) }
@@ -75,9 +76,17 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.height(8.dp))
                     when (tab) {
                         0 -> {
-                            Text("点击任意位置查看音名", fontWeight = FontWeight.Medium)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("点击位置查看音名", fontWeight = FontWeight.Medium)
+                                Spacer(Modifier.weight(1f))
+                                TextButton(onClick = { revealAll = !revealAll }) {
+                                    Text(if (revealAll) "隐藏音名" else "显示全部")
+                                }
+                            }
+                            Text("先记住空弦：E（4弦）· A（3弦）· D（2弦）· G（1弦）",
+                                color = Color.Gray, style = MaterialTheme.typography.bodySmall)
                             Spacer(Modifier.height(12.dp))
-                            Fretboard(12, selected, { selected = it }, showNotes = false)
+                            Fretboard(12, selected, { selected = it }, showNotes = revealAll)
                             Spacer(Modifier.height(16.dp))
                             Text(selected?.let { "${strings[it.string].first} 弦 · 第 ${it.fret} 品 = ${it.note}" } ?: "先点一个位置试试", style = MaterialTheme.typography.titleLarge)
                             Text("小技巧：第 12 品与空弦同名，相差一个八度。", color = Color.Gray)
@@ -88,8 +97,14 @@ class MainActivity : ComponentActivity() {
                             Spacer(Modifier.height(12.dp))
                             Fretboard(listOf(0, 3, 5, 12)[level], question, {}, false, enabled = false)
                             Spacer(Modifier.height(12.dp))
+                            val answerChoices = remember(question, level) {
+                                val learned = pool(level).map { it.note }.distinct()
+                                    .filter { it != question.note }.shuffled()
+                                val remaining = names.filter { it != question.note }.shuffled()
+                                ((learned + remaining).distinct().take(3) + question.note).shuffled()
+                            }
                             LazyColumn {
-                                items(names.chunked(4)) { row ->
+                                items(answerChoices.chunked(2)) { row ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                         row.forEach { note ->
                                             OutlinedButton(onClick = {
@@ -110,7 +125,7 @@ class MainActivity : ComponentActivity() {
                             if (answered) Button(onClick = { question = nextQuestion(level, misses, question); feedback = ""; answered = false }) { Text("下一题") }
                         }
                         2 -> {
-                            Text("找到所有的 ${question.note}", style = MaterialTheme.typography.titleLarge)
+                            Text("在指板上找到 ${question.note}", style = MaterialTheme.typography.titleLarge)
                             Text("点击指板上任意一个正确位置", color = Color.Gray)
                             Spacer(Modifier.height(12.dp))
                             Fretboard(listOf(0, 3, 5, 12)[level], selected, { pos ->
