@@ -14,6 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.verticalScroll
 import java.util.concurrent.TimeUnit
 
 private val notes = listOf("C","C#","D","D#","E","F","F#","G","G#","A","A#","B")
@@ -81,18 +82,20 @@ class MainActivity : ComponentActivity() {
             var practiceString by remember { mutableIntStateOf(3) }
             var practiceIndex by remember { mutableIntStateOf(0) }
             var practiceReveal by remember { mutableStateOf(false) }
+            var speedStart by remember { mutableLongStateOf(System.currentTimeMillis()) }
+            var quickAnswer by remember { mutableStateOf(false) }
             val max = stageMax[stage]
             val findMax = if (stage == 4) 24 else 12
             fun newQuestion() {
                 spot = nextSpot(stage,prefs,spot)
-                revealed = false; feedback = ""; selected = null; testAnswered = false; tick++
+                revealed = false; feedback = ""; selected = null; testAnswered = false; quickAnswer=false; speedStart=System.currentTimeMillis(); tick++
             }
             fun nextTarget() {
                 target = (if(stage <= 2) naturalNotes else notes).filter { it != target }.random()
                 found = emptySet(); checked = false; feedback = ""
             }
             MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF3366A5))) {
-                Column(Modifier.fillMaxSize().background(Color(0xFFF5F7FB)).padding(horizontal=12.dp, vertical=6.dp)) {
+                Column(Modifier.fillMaxSize().background(Color(0xFFF5F7FB)).verticalScroll(rememberScrollState()).padding(horizontal=12.dp, vertical=6.dp)) {
                     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),verticalAlignment=Alignment.CenterVertically, horizontalArrangement=Arrangement.spacedBy(6.dp)) {
                         Text("BassMemo 🎸",fontWeight=FontWeight.Bold,style=MaterialTheme.typography.titleLarge)
                         listOf("地图","回忆","实测","找全","跟弹","记录").forEachIndexed { i,t ->
@@ -129,16 +132,16 @@ class MainActivity : ComponentActivity() {
                                 Text("闭眼想一想：${tuning[spot.string].first}弦 第${spot.fret}品 是什么音？",
                                     style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
                                 Spacer(Modifier.weight(1f))
-                                if(!revealed) Button(onClick={revealed=true}) { Text("我想好了 · 揭晓") }
+                                if(!revealed) Button(onClick={quickAnswer=System.currentTimeMillis()-speedStart<=3000;revealed=true}) { Text("我想好了 · 揭晓") }
                             }
                             Fretboard(max,spot,{},false,enabled=false)
                             if(revealed) {
                                 Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(12.dp)) {
                                     Text("答案：${spot.note}",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)
-                                    Button(onClick={record(prefs,spot,true);newQuestion()}) { Text("我独立想起来了") }
-                                    OutlinedButton(onClick={record(prefs,spot,false);newQuestion()}) { Text("没想起来 / 靠推算") }
+                                    Button(onClick={record(prefs,spot,true);newQuestion()}) { Text("直接想起") }
+                                    OutlinedButton(onClick={record(prefs,spot,false);newQuestion()}) { Text("靠推算 / 没想起") }
                                 }
-                                Text("只有无需看提示、直接想起音名才选“独立想起来了”。",color=Color.Gray)
+                                Text(if(quickAnswer) "3秒内揭晓：如果是直接想起，可以选「直接想起」。" else "超过3秒：如果依靠逐品推算，请选「靠推算」。",color=Color.Gray)
                             } else {
                                 Text("请先说出音名，再揭晓；不要通过选项猜答案。",color=Color.Gray)
                             }
@@ -159,6 +162,39 @@ class MainActivity : ComponentActivity() {
                             Fretboard(findMax,null,{p->if(!checked)found=if(p in found)found-p else found+p},false,
                                 selectedSet=found,correctSet=if(checked)allSpots(findMax).filter{it.note==target}.toSet() else emptySet())
                             Text(if(checked)feedback else "跨弦找全相同音名的位置；点亮所有位置后再检查。",color=Color.Gray)
+                        }
+                        3 -> {
+                            Text("给出音名，尽可能在整块指板找到全部位置；不依靠数品位。",style=MaterialTheme.typography.titleMedium)
+                            Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                                Text("目标音：$target",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)
+                                Text("已选 ${found.size}")
+                                Button(onClick={
+                                    checked=true
+                                    val answers=allSpots(findMax).filter { it.note==target }.toSet()
+                                    feedback="找到 ${found.intersect(answers).size}/${answers.size}，误选 ${found.subtract(answers).size}"
+                                }) { Text("检查") }
+                                OutlinedButton(onClick={nextTarget()}) { Text("换一个音") }
+                            }
+                            Fretboard(findMax,null,{p->if(!checked)found=if(p in found)found-p else found+p},false,
+                                selectedSet=found,correctSet=if(checked)allSpots(findMax).filter{it.note==target}.toSet() else emptySet())
+                            Text(if(checked)feedback else "先找全，再检查；绿色位置为正确答案。")
+                        }
+                        4 -> {
+                            Text("跟弹训练：沿一根弦逐品弹奏，先念音名，再点开答案。",style=MaterialTheme.typography.titleMedium)
+                            Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                                listOf(3,2,1,0).forEach { i ->
+                                    FilterChip(selected=practiceString==i,onClick={practiceString=i;practiceIndex=0;practiceReveal=false},label={Text("${tuning[i].first}弦")})
+                                }
+                            }
+                            val p=Spot(practiceString,practiceIndex)
+                            Text("${tuning[practiceString].first}弦 · 第$practiceIndex 品",style=MaterialTheme.typography.headlineSmall)
+                            Fretboard(maxOf(12,max),p,{},false,enabled=false)
+                            Row(horizontalArrangement=Arrangement.spacedBy(10.dp),verticalAlignment=Alignment.CenterVertically) {
+                                OutlinedButton(onClick={practiceIndex=(practiceIndex-1).coerceAtLeast(0);practiceReveal=false}) { Text("上一品") }
+                                Button(onClick={practiceReveal=!practiceReveal}) { Text(if(practiceReveal)"隐藏答案" else "显示答案") }
+                                OutlinedButton(onClick={practiceIndex=(practiceIndex+1)%(maxOf(12,max)+1);practiceReveal=false}) { Text("下一品") }
+                                if(practiceReveal) Text(p.note,style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.Bold)
+                            }
                         }
                         else -> {
                             val total=prefs.getInt("total",0)
