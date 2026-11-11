@@ -6,8 +6,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -15,148 +13,158 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import kotlin.random.Random
+import java.util.concurrent.TimeUnit
 
-private val names = listOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
-private val strings = listOf("G" to 7, "D" to 2, "A" to 9, "E" to 4) // high to low on screen
-private data class Pos(val string: Int, val fret: Int) {
-    val note: String get() = names[(strings[string].second + fret) % 12]
+private val notes = listOf("C","C#","D","D#","E","F","F#","G","G#","A","A#","B")
+private val tuning = listOf("G" to 7, "D" to 2, "A" to 9, "E" to 4)
+private val anchors = setOf(0,3,5,7,9,12)
+private data class Spot(val string: Int, val fret: Int) {
+    val note: String get() = notes[(tuning[string].second + fret) % 12]
+    val key: String get() = "$string:$fret"
 }
-private fun pool(level: Int): List<Pos> {
-    val maxFret = listOf(0, 3, 5, 12)[level]
-    return strings.indices.flatMap { s -> (0..maxFret).map { Pos(s, it) } }
+private fun allSpots(max: Int) = (0..3).flatMap { s -> (0..max).map { Spot(s,it) } }
+private fun candidatePool(stage: Int): List<Spot> {
+    val max = listOf(0,5,12,12)[stage]
+    return allSpots(max).filter { p ->
+        when(stage) {
+            0 -> p.fret == 0
+            1 -> p.string >= 2 && !p.note.contains("#")
+            2 -> !p.note.contains("#")
+            else -> true
+        }
+    }
 }
-private fun nextQuestion(level: Int, misses: Map<String, Int>, previous: Pos? = null): Pos {
-    val choices = pool(level).filter { it != previous }.ifEmpty { pool(level) }
-    val weighted = choices.flatMap { p -> List(1 + (misses["${p.string}:${p.fret}"] ?: 0).coerceAtMost(4)) { p } }
-    return weighted.random()
+private fun nextSpot(stage: Int, prefs: android.content.SharedPreferences, old: Spot? = null): Spot {
+    val now = System.currentTimeMillis()
+    val options = candidatePool(stage).filter { it != old }.ifEmpty { candidatePool(stage) }
+    val due = options.filter { prefs.getLong("due_${it.key}", 0L) <= now }
+    val base = due.ifEmpty { options }
+    val weights = base.flatMap { spot ->
+        val errors = prefs.getInt("err_${spot.key}", 0).coerceAtMost(4)
+        List(1 + errors) { spot }
+    }
+    return weights.random()
+}
+private fun record(prefs: android.content.SharedPreferences, spot: Spot, remembered: Boolean) {
+    val key = spot.key
+    val level = prefs.getInt("box_$key", 0)
+    val next = if (remembered) (level + 1).coerceAtMost(5) else 0
+    val delays = longArrayOf(0,1,3,7,14,30)
+    val due = System.currentTimeMillis() + TimeUnit.DAYS.toMillis(delays[next])
+    prefs.edit().putInt("box_$key", next).putLong("due_$key", due)
+        .putInt("err_$key", if (remembered) prefs.getInt("err_$key",0) else prefs.getInt("err_$key",0)+1)
+        .putInt("total",prefs.getInt("total",0)+1)
+        .putInt("correct",prefs.getInt("correct",0)+(if(remembered)1 else 0)).apply()
 }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val prefs = getSharedPreferences("bassmemo", Context.MODE_PRIVATE)
+        val prefs = getSharedPreferences("bassmemo_v2",Context.MODE_PRIVATE)
         setContent {
             var tab by remember { mutableIntStateOf(0) }
-            var level by remember { mutableIntStateOf(prefs.getInt("level", 0).coerceIn(0, 3)) }
-            var correct by remember { mutableIntStateOf(prefs.getInt("correct", 0)) }
-            var total by remember { mutableIntStateOf(prefs.getInt("total", 0)) }
-            var streak by remember { mutableIntStateOf(0) }
-            val misses = remember { mutableStateMapOf<String, Int>().apply {
-                prefs.all.forEach { (k, v) -> if (k.startsWith("miss_") && v is Int) put(k.removePrefix("miss_"), v) }
-            } }
-            var selected by remember { mutableStateOf<Pos?>(null) }
-            var revealAll by remember { mutableStateOf(false) }
-            var question by remember { mutableStateOf(nextQuestion(level, misses)) }
+            var stage by remember { mutableIntStateOf(prefs.getInt("stage",0).coerceIn(0,3)) }
+            var spot by remember { mutableStateOf(nextSpot(stage,prefs)) }
+            var selected by remember { mutableStateOf<Spot?>(null) }
+            var showMap by remember { mutableStateOf(false) }
+            var revealed by remember { mutableStateOf(false) }
             var feedback by remember { mutableStateOf("") }
-            var answered by remember { mutableStateOf(false) }
-            val accent = Color(0xFF4B77B8)
-            MaterialTheme(colorScheme = lightColorScheme(primary = accent)) {
-                Column(Modifier.fillMaxSize().background(Color(0xFFF6F8FC)).padding(16.dp)) {
-                    Text("BassMemo  🎸", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                    Text("每天十分钟，记住每一格的音名", color = Color.Gray)
-                    Spacer(Modifier.height(12.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("指板", "识音", "找音", "记录").forEachIndexed { index, name ->
-                            FilterChip(selected = tab == index, onClick = { tab = index; feedback = ""; answered = false }, label = { Text(name) })
+            var tick by remember { mutableIntStateOf(0) }
+            var target by remember { mutableStateOf("C") }
+            var found by remember { mutableStateOf(setOf<Spot>()) }
+            var checked by remember { mutableStateOf(false) }
+            val max = listOf(0,5,12,12)[stage]
+            fun newQuestion() {
+                spot = nextSpot(stage,prefs,spot)
+                revealed = false; feedback = ""; selected = null; tick++
+            }
+            fun nextTarget() {
+                target = notes.filter { it != target }.random()
+                found = emptySet(); checked = false; feedback = ""
+            }
+            MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF3366A5))) {
+                Column(Modifier.fillMaxSize().background(Color(0xFFF5F7FB)).padding(horizontal=12.dp, vertical=6.dp)) {
+                    Row(verticalAlignment=Alignment.CenterVertically, horizontalArrangement=Arrangement.spacedBy(12.dp)) {
+                        Text("BassMemo 🎸",fontWeight=FontWeight.Bold,style=MaterialTheme.typography.titleLarge)
+                        listOf("指板地图","主动回忆","找遍同音","学习记录").forEachIndexed { i,t ->
+                            FilterChip(selected=tab==i,onClick={tab=i;feedback="";revealed=false},label={Text(t)})
                         }
                     }
-                    Spacer(Modifier.height(10.dp))
-                    Text("练习范围", fontWeight = FontWeight.SemiBold)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf("空弦", "0–3品", "0–5品", "0–12品").forEachIndexed { index, name ->
-                            FilterChip(selected = level == index, onClick = {
-                                level = index; prefs.edit().putInt("level", level).apply()
-                                question = nextQuestion(level, misses); feedback = ""; answered = false; selected = null
-                            }, label = { Text(name) })
+                    Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                        Text("学习阶段",style=MaterialTheme.typography.labelLarge)
+                        listOf("①空弦","②E/A自然音","③四弦自然音","④全部半音").forEachIndexed { i,t ->
+                            FilterChip(selected=stage==i,onClick={
+                                stage=i;prefs.edit().putInt("stage",i).apply();newQuestion()
+                                found=emptySet();checked=false
+                            },label={Text(t)})
                         }
+                        Text("横屏 · 0–12品",color=Color.Gray,style=MaterialTheme.typography.labelSmall)
                     }
-                    Spacer(Modifier.height(8.dp))
-                    when (tab) {
+                    when(tab) {
                         0 -> {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("点击位置查看音名", fontWeight = FontWeight.Medium)
+                            Row(verticalAlignment=Alignment.CenterVertically) {
+                                Text("先记锚点，再隐藏音名主动回忆。",fontWeight=FontWeight.Medium)
                                 Spacer(Modifier.weight(1f))
-                                TextButton(onClick = { revealAll = !revealAll }) {
-                                    Text(if (revealAll) "隐藏音名" else "显示全部")
-                                }
+                                TextButton(onClick={showMap=!showMap}) { Text(if(showMap)"隐藏音名" else "显示音名") }
                             }
-                            Text("先记住空弦：E（4弦）· A（3弦）· D（2弦）· G（1弦）",
-                                color = Color.Gray, style = MaterialTheme.typography.bodySmall)
-                            Spacer(Modifier.height(12.dp))
-                            Fretboard(12, selected, { selected = it }, showNotes = revealAll)
-                            Spacer(Modifier.height(16.dp))
-                            Text(selected?.let { "${strings[it.string].first} 弦 · 第 ${it.fret} 品 = ${it.note}" } ?: "先点一个位置试试", style = MaterialTheme.typography.titleLarge)
-                            Text("小技巧：第 12 品与空弦同名，相差一个八度。", color = Color.Gray)
+                            Fretboard(12, selected, { selected=it }, showMap, anchorsOnly=!showMap)
+                            Text(selected?.let { "${tuning[it.string].first}弦 第${it.fret}品 = ${it.note}" }
+                                ?: "锚点：空弦 E A D G；第5品与下一根较细弦的空弦同名；第12品重复空弦",
+                                style=MaterialTheme.typography.bodyLarge)
+                            Text("八度形状：从 E/A 弦向较细方向跨两根弦、向高品位移动两品。先用规律定位，再练瞬间认音。",
+                                color=Color.Gray,style=MaterialTheme.typography.bodySmall)
                         }
                         1 -> {
-                            Text("这个位置是什么音？", style = MaterialTheme.typography.titleLarge)
-                            Text("${strings[question.string].first} 弦 · 第 ${question.fret} 品", fontWeight = FontWeight.Bold)
-                            Spacer(Modifier.height(12.dp))
-                            Fretboard(listOf(0, 3, 5, 12)[level], question, {}, false, enabled = false)
-                            Spacer(Modifier.height(12.dp))
-                            val answerChoices = remember(question, level) {
-                                val learned = pool(level).map { it.note }.distinct()
-                                    .filter { it != question.note }.shuffled()
-                                val remaining = names.filter { it != question.note }.shuffled()
-                                ((learned + remaining).distinct().take(3) + question.note).shuffled()
+                            Row(verticalAlignment=Alignment.CenterVertically) {
+                                Text("闭眼想一想：${tuning[spot.string].first}弦 第${spot.fret}品 是什么音？",
+                                    style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
+                                Spacer(Modifier.weight(1f))
+                                if(!revealed) Button(onClick={revealed=true}) { Text("我想好了 · 揭晓") }
                             }
-                            LazyColumn {
-                                items(answerChoices.chunked(2)) { row ->
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                                        row.forEach { note ->
-                                            OutlinedButton(onClick = {
-                                                if (!answered) {
-                                                    val ok = note == question.note
-                                                    correct += if (ok) 1 else 0; total++; streak = if (ok) streak + 1 else 0
-                                                    if (!ok) { val key = "${question.string}:${question.fret}"; misses[key] = (misses[key] ?: 0) + 1; prefs.edit().putInt("miss_$key", misses[key]!!).apply() }
-                                                    prefs.edit().putInt("correct", correct).putInt("total", total).apply()
-                                                    feedback = if (ok) "答对啦！" else "正确答案：${question.note}"
-                                                    answered = true
-                                                }
-                                            }, modifier = Modifier.weight(1f)) { Text(note) }
-                                        }
-                                    }
+                            Fretboard(max,spot,{},false,enabled=false)
+                            if(revealed) {
+                                Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(12.dp)) {
+                                    Text("答案：${spot.note}",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)
+                                    Button(onClick={record(prefs,spot,true);newQuestion()}) { Text("我独立想起来了") }
+                                    OutlinedButton(onClick={record(prefs,spot,false);newQuestion()}) { Text("没想起来 / 靠推算") }
                                 }
+                                Text("只有无需看提示、直接想起音名才选“独立想起来了”。",color=Color.Gray)
+                            } else {
+                                Text("请先说出音名，再揭晓；不要通过选项猜答案。",color=Color.Gray)
                             }
-                            Text(feedback, fontWeight = FontWeight.Bold, color = accent)
-                            if (answered) Button(onClick = { question = nextQuestion(level, misses, question); feedback = ""; answered = false }) { Text("下一题") }
                         }
                         2 -> {
-                            Text("在指板上找到 ${question.note}", style = MaterialTheme.typography.titleLarge)
-                            Text("点击指板上任意一个正确位置", color = Color.Gray)
-                            Spacer(Modifier.height(12.dp))
-                            Fretboard(listOf(0, 3, 5, 12)[level], selected, { pos ->
-                                if (!answered) {
-                                    selected = pos
-                                    val ok = pos.note == question.note
-                                    correct += if (ok) 1 else 0; total++; streak = if (ok) streak + 1 else 0
-                                    if (!ok) { val key = "${question.string}:${question.fret}"; misses[key] = (misses[key] ?: 0) + 1; prefs.edit().putInt("miss_$key", misses[key]!!).apply() }
-                                    prefs.edit().putInt("correct", correct).putInt("total", total).apply()
-                                    feedback = if (ok) "答对啦！" else "这是 ${pos.note}，再记住它的位置"
-                                    answered = true
-                                }
-                            }, false)
-                            Spacer(Modifier.height(12.dp))
-                            Text(feedback, color = accent, fontWeight = FontWeight.Bold)
-                            if (answered) Button(onClick = { question = nextQuestion(level, misses, question); selected = null; feedback = ""; answered = false }) { Text("下一题") }
+                            Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                                Text("找出 0–12 品所有的 $target",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
+                                Text("已选择 ${found.size} 个",color=Color.Gray)
+                                Spacer(Modifier.weight(1f))
+                                if(!checked) Button(onClick={
+                                    checked=true
+                                    val answers=allSpots(12).filter { it.note==target }.toSet()
+                                    feedback="正确 ${found.intersect(answers).size}/${answers.size}；误选 ${found.subtract(answers).size} 个"
+                                }) { Text("检查答案") }
+                                else Button(onClick={nextTarget()}) { Text("下一个音") }
+                                TextButton(onClick={found=emptySet();checked=false;feedback=""}) { Text("重试") }
+                            }
+                            Fretboard(12,null,{p->if(!checked)found=if(p in found)found-p else found+p},false,
+                                selectedSet=found,correctSet=if(checked)allSpots(12).filter{it.note==target}.toSet() else emptySet())
+                            Text(if(checked)feedback else "跨弦找全相同音名的位置；点亮所有位置后再检查。",color=Color.Gray)
                         }
                         else -> {
-                            Text("我的学习记录", style = MaterialTheme.typography.titleLarge)
-                            Spacer(Modifier.height(12.dp))
-                            Text("已答题：$total")
-                            Text("正确题数：$correct")
-                            Text("正确率：${if (total == 0) 0 else correct * 100 / total}%")
-                            Text("本次连续答对：$streak")
-                            Text("累计错题位置：${misses.size}")
-                            Spacer(Modifier.height(12.dp))
-                            Text("错题会在识音测验中获得更高抽取权重。", color = Color.Gray)
-                            OutlinedButton(onClick = {
-                                prefs.edit().clear().apply(); correct = 0; total = 0; streak = 0; misses.clear()
-                                question = nextQuestion(level, misses); feedback = ""; answered = false
-                            }) { Text("清空学习记录") }
+                            val total=prefs.getInt("total",0)
+                            val correct=prefs.getInt("correct",0)
+                            val due=candidatePool(stage).count { prefs.getLong("due_${it.key}",0L)<=System.currentTimeMillis() }
+                            val mastered=candidatePool(stage).count { prefs.getInt("box_${it.key}",0)>=3 }
+                            Text("累计主动回忆：$total 次 · 独立回忆：$correct 次 · 正确率：${if(total==0)0 else correct*100/total}%",
+                                style=MaterialTheme.typography.titleMedium)
+                            Text("当前阶段：${candidatePool(stage).size} 个位置 · 待复习：$due · 达到7天复习级别：$mastered")
+                            Text("复习间隔：答对后约1、3、7、14、30天；答错重置。题目优先抽取到期位置与错题。",
+                                color=Color.Gray)
+                            Text("每天建议：2分钟锚点复习 + 5分钟主动回忆 + 3分钟跨弦找音。",fontWeight=FontWeight.Medium)
+                            OutlinedButton(onClick={
+                                prefs.edit().clear().apply();stage=0;newQuestion();tick++
+                            }) { Text("重置全部学习记录") }
                         }
                     }
                 }
@@ -166,28 +174,46 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun Fretboard(maxFret: Int, highlighted: Pos?, onTap: (Pos) -> Unit, showNotes: Boolean, enabled: Boolean = true) {
-    Column(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
-        Row {
-            Box(Modifier.width(44.dp).height(25.dp), contentAlignment = Alignment.Center) { Text("弦") }
-            (0..maxFret).forEach { fret ->
-                Box(Modifier.width(54.dp).height(25.dp), contentAlignment = Alignment.Center) { Text("$fret", color = Color.Gray) }
+private fun Fretboard(max: Int, highlighted: Spot?, onTap: (Spot)->Unit,
+    showNotes: Boolean, enabled: Boolean=true, anchorsOnly: Boolean=false,
+    selectedSet: Set<Spot> = emptySet(), correctSet: Set<Spot> = emptySet()) {
+    BoxWithConstraints(Modifier.fillMaxWidth().heightIn(max=270.dp)) {
+        val cellWidth = ((maxWidth - 44.dp) / (max+1)).coerceAtLeast(34.dp)
+        Column(Modifier.horizontalScroll(rememberScrollState())) {
+            Row {
+                Box(Modifier.width(44.dp).height(24.dp),contentAlignment=Alignment.Center) { Text("弦") }
+                (0..max).forEach { fret ->
+                    Box(Modifier.width(cellWidth).height(24.dp),contentAlignment=Alignment.Center) {
+                        Text("$fret",color=if(fret in anchors)Color(0xFF245F9C) else Color.Gray,
+                            fontWeight=if(fret in anchors)FontWeight.Bold else FontWeight.Normal)
+                    }
+                }
             }
-        }
-        strings.forEachIndexed { s, string ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.width(44.dp).height(54.dp), contentAlignment = Alignment.Center) { Text(string.first, fontWeight = FontWeight.Bold) }
-                (0..maxFret).forEach { fret ->
-                    val pos = Pos(s, fret)
-                    val isSelected = highlighted == pos
-                    Box(
-                        Modifier.width(54.dp).height(54.dp).padding(2.dp)
-                            .background(if (isSelected) Color(0xFF8BB9F1) else Color(0xFFE5EAF0), RoundedCornerShape(8.dp))
-                            .then(if (enabled) Modifier.clickable { onTap(pos) } else Modifier),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(if (showNotes) pos.note else if (isSelected) "●" else "•",
-                            fontWeight = FontWeight.Bold, color = if (isSelected) Color(0xFF153B71) else Color(0xFF8290A0))
+            tuning.forEachIndexed { s,string ->
+                Row(verticalAlignment=Alignment.CenterVertically) {
+                    Box(Modifier.width(44.dp).height(48.dp),contentAlignment=Alignment.Center) {
+                        Text(string.first,fontWeight=FontWeight.Bold)
+                    }
+                    (0..max).forEach { fret ->
+                        val p=Spot(s,fret)
+                        val active=p==highlighted || p in selectedSet
+                        val correct=p in correctSet
+                        Box(Modifier.width(cellWidth).height(48.dp).padding(2.dp)
+                            .background(when {
+                                correct -> Color(0xFFB5E1C1)
+                                active -> Color(0xFF9EC6F2)
+                                fret in anchors && anchorsOnly -> Color(0xFFE1E9F5)
+                                else -> Color(0xFFEBEDF0)
+                            },RoundedCornerShape(5.dp))
+                            .then(if(enabled)Modifier.clickable{onTap(p)}else Modifier),
+                            contentAlignment=Alignment.Center) {
+                            Text(when {
+                                showNotes -> p.note
+                                active || correct -> "●"
+                                fret in anchors -> "•"
+                                else -> "·"
+                            },fontWeight=FontWeight.Bold,color=Color(0xFF244C79))
+                        }
                     }
                 }
             }
