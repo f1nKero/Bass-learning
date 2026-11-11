@@ -27,9 +27,61 @@ jobs:
           gradle-version: '8.9'
       - name: Build APK
         run: gradle --no-daemon :app:assembleDebug
+      - name: Verify APK archive, package and signature
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          unzip -t "$APK" | tail -1
+          aapt dump badging "$APK" | tee apk-badging.txt
+          grep -q "package: name='com.f1nkero.bassmemo'" apk-badging.txt
+          grep -q "launchable-activity: name='com.f1nkero.bassmemo.MainActivity'" apk-badging.txt
+          apksigner verify --verbose "$APK"
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: BassMemo-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: BassMemo-debug-apk
+          path: apk
+      - name: Enable KVM for Android emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Launch APK on Android 15 emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            adb install -r apk/app-debug.apk
+            adb shell am start -W -n com.f1nkero.bassmemo/.MainActivity
+            sleep 5
+            test -n "$(adb shell pidof com.f1nkero.bassmemo | tr -d '\r')"
+            adb shell uiautomator dump /sdcard/window.xml
+            adb pull /sdcard/window.xml smoke-window.xml
+            grep -q "BassMemo" smoke-window.xml
+            adb shell screencap -p /sdcard/bassmemo-landscape.png
+            adb pull /sdcard/bassmemo-landscape.png smoke-landscape.png
+            echo "PASS: APK installed, MainActivity launched, Compose UI visible."
+      - name: Upload emulator smoke-test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BassMemo-smoke-evidence
+          path: |
+            smoke-window.xml
+            smoke-landscape.png
+          if-no-files-found: ignore
