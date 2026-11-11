@@ -18,14 +18,17 @@ import java.util.concurrent.TimeUnit
 
 private val notes = listOf("C","C#","D","D#","E","F","F#","G","G#","A","A#","B")
 private val tuning = listOf("G" to 7, "D" to 2, "A" to 9, "E" to 4)
-private val anchors = setOf(0,3,5,7,9,12)
+private val anchors = setOf(0,3,5,7,9,12,15,17,19,21,24)
+private val stageMax = listOf(0,5,12,12,24)
+private val naturalNotes = listOf("C","D","E","F","G","A","B")
+private val fourths = listOf("C","F","A#","D#","G#","C#","F#","B","E","A","D","G")
 private data class Spot(val string: Int, val fret: Int) {
     val note: String get() = notes[(tuning[string].second + fret) % 12]
     val key: String get() = "$string:$fret"
 }
 private fun allSpots(max: Int) = (0..3).flatMap { s -> (0..max).map { Spot(s,it) } }
 private fun candidatePool(stage: Int): List<Spot> {
-    val max = listOf(0,5,12,12)[stage]
+    val max = stageMax[stage]
     return allSpots(max).filter { p ->
         when(stage) {
             0 -> p.fret == 0
@@ -64,7 +67,7 @@ class MainActivity : ComponentActivity() {
         val prefs = getSharedPreferences("bassmemo_v2",Context.MODE_PRIVATE)
         setContent {
             var tab by remember { mutableIntStateOf(0) }
-            var stage by remember { mutableIntStateOf(prefs.getInt("stage",0).coerceIn(0,3)) }
+            var stage by remember { mutableIntStateOf(prefs.getInt("stage",0).coerceIn(0,4)) }
             var spot by remember { mutableStateOf(nextSpot(stage,prefs)) }
             var selected by remember { mutableStateOf<Spot?>(null) }
             var showMap by remember { mutableStateOf(false) }
@@ -74,32 +77,38 @@ class MainActivity : ComponentActivity() {
             var target by remember { mutableStateOf("C") }
             var found by remember { mutableStateOf(setOf<Spot>()) }
             var checked by remember { mutableStateOf(false) }
-            val max = listOf(0,5,12,12)[stage]
+            var testAnswered by remember { mutableStateOf(false) }
+            var practiceString by remember { mutableIntStateOf(3) }
+            var practiceIndex by remember { mutableIntStateOf(0) }
+            var practiceReveal by remember { mutableStateOf(false) }
+            val max = stageMax[stage]
+            val findMax = if (stage == 4) 24 else 12
             fun newQuestion() {
                 spot = nextSpot(stage,prefs,spot)
-                revealed = false; feedback = ""; selected = null; tick++
+                revealed = false; feedback = ""; selected = null; testAnswered = false; tick++
             }
             fun nextTarget() {
-                target = notes.filter { it != target }.random()
+                target = (if(stage <= 2) naturalNotes else notes).filter { it != target }.random()
                 found = emptySet(); checked = false; feedback = ""
             }
             MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF3366A5))) {
                 Column(Modifier.fillMaxSize().background(Color(0xFFF5F7FB)).padding(horizontal=12.dp, vertical=6.dp)) {
-                    Row(verticalAlignment=Alignment.CenterVertically, horizontalArrangement=Arrangement.spacedBy(12.dp)) {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),verticalAlignment=Alignment.CenterVertically, horizontalArrangement=Arrangement.spacedBy(6.dp)) {
                         Text("BassMemo 🎸",fontWeight=FontWeight.Bold,style=MaterialTheme.typography.titleLarge)
-                        listOf("指板地图","主动回忆","找遍同音","学习记录").forEachIndexed { i,t ->
+                        listOf("地图","回忆","实测","找全","跟弹","记录").forEachIndexed { i,t ->
                             FilterChip(selected=tab==i,onClick={tab=i;feedback="";revealed=false},label={Text(t)})
                         }
                     }
-                    Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                        Text("学习阶段",style=MaterialTheme.typography.labelLarge)
-                        listOf("①空弦","②E/A自然音","③四弦自然音","④全部半音").forEachIndexed { i,t ->
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                        Text("阶段",style=MaterialTheme.typography.labelLarge)
+                        listOf("①空弦","②E/A自然音","③四弦自然音","④0–12全部","⑤0–24全板").forEachIndexed { i,t ->
                             FilterChip(selected=stage==i,onClick={
                                 stage=i;prefs.edit().putInt("stage",i).apply();newQuestion()
                                 found=emptySet();checked=false
+                                target=(if(i <= 2)naturalNotes else notes).random()
                             },label={Text(t)})
                         }
-                        Text("横屏 · 0–12品",color=Color.Gray,style=MaterialTheme.typography.labelSmall)
+                        Text("横屏 · 左右滑动",color=Color.Gray,style=MaterialTheme.typography.labelSmall)
                     }
                     when(tab) {
                         0 -> {
@@ -108,7 +117,7 @@ class MainActivity : ComponentActivity() {
                                 Spacer(Modifier.weight(1f))
                                 TextButton(onClick={showMap=!showMap}) { Text(if(showMap)"隐藏音名" else "显示音名") }
                             }
-                            Fretboard(12, selected, { selected=it }, showMap, anchorsOnly=!showMap)
+                            Fretboard(maxOf(12,max), selected, { selected=it }, showMap, anchorsOnly=!showMap)
                             Text(selected?.let { "${tuning[it.string].first}弦 第${it.fret}品 = ${it.note}" }
                                 ?: "锚点：空弦 E A D G；第5品与下一根较细弦的空弦同名；第12品重复空弦",
                                 style=MaterialTheme.typography.bodyLarge)
@@ -136,19 +145,19 @@ class MainActivity : ComponentActivity() {
                         }
                         2 -> {
                             Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                                Text("找出 0–12 品所有的 $target",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
+                                Text("找出 0–${findMax} 品所有的 $target",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
                                 Text("已选择 ${found.size} 个",color=Color.Gray)
                                 Spacer(Modifier.weight(1f))
                                 if(!checked) Button(onClick={
                                     checked=true
-                                    val answers=allSpots(12).filter { it.note==target }.toSet()
+                                    val answers=allSpots(findMax).filter { it.note==target }.toSet()
                                     feedback="正确 ${found.intersect(answers).size}/${answers.size}；误选 ${found.subtract(answers).size} 个"
                                 }) { Text("检查答案") }
                                 else Button(onClick={nextTarget()}) { Text("下一个音") }
                                 TextButton(onClick={found=emptySet();checked=false;feedback=""}) { Text("重试") }
                             }
-                            Fretboard(12,null,{p->if(!checked)found=if(p in found)found-p else found+p},false,
-                                selectedSet=found,correctSet=if(checked)allSpots(12).filter{it.note==target}.toSet() else emptySet())
+                            Fretboard(findMax,null,{p->if(!checked)found=if(p in found)found-p else found+p},false,
+                                selectedSet=found,correctSet=if(checked)allSpots(findMax).filter{it.note==target}.toSet() else emptySet())
                             Text(if(checked)feedback else "跨弦找全相同音名的位置；点亮所有位置后再检查。",color=Color.Gray)
                         }
                         else -> {
@@ -177,13 +186,13 @@ class MainActivity : ComponentActivity() {
 private fun Fretboard(max: Int, highlighted: Spot?, onTap: (Spot)->Unit,
     showNotes: Boolean, enabled: Boolean=true, anchorsOnly: Boolean=false,
     selectedSet: Set<Spot> = emptySet(), correctSet: Set<Spot> = emptySet()) {
-    BoxWithConstraints(Modifier.fillMaxWidth().heightIn(max=270.dp)) {
-        val cellWidth = ((maxWidth - 44.dp) / (max+1)).coerceAtLeast(34.dp)
+    BoxWithConstraints(Modifier.fillMaxWidth().heightIn(max=205.dp)) {
+        val cellWidth = ((maxWidth - 38.dp) / (max+1)).coerceAtLeast(30.dp).coerceAtMost(59.dp)
         Column(Modifier.horizontalScroll(rememberScrollState())) {
             Row {
-                Box(Modifier.width(44.dp).height(24.dp),contentAlignment=Alignment.Center) { Text("弦") }
+                Box(Modifier.width(38.dp).height(21.dp),contentAlignment=Alignment.Center) { Text("弦") }
                 (0..max).forEach { fret ->
-                    Box(Modifier.width(cellWidth).height(24.dp),contentAlignment=Alignment.Center) {
+                    Box(Modifier.width(cellWidth).height(21.dp),contentAlignment=Alignment.Center) {
                         Text("$fret",color=if(fret in anchors)Color(0xFF245F9C) else Color.Gray,
                             fontWeight=if(fret in anchors)FontWeight.Bold else FontWeight.Normal)
                     }
@@ -191,14 +200,14 @@ private fun Fretboard(max: Int, highlighted: Spot?, onTap: (Spot)->Unit,
             }
             tuning.forEachIndexed { s,string ->
                 Row(verticalAlignment=Alignment.CenterVertically) {
-                    Box(Modifier.width(44.dp).height(48.dp),contentAlignment=Alignment.Center) {
+                    Box(Modifier.width(38.dp).height(38.dp),contentAlignment=Alignment.Center) {
                         Text(string.first,fontWeight=FontWeight.Bold)
                     }
                     (0..max).forEach { fret ->
                         val p=Spot(s,fret)
                         val active=p==highlighted || p in selectedSet
                         val correct=p in correctSet
-                        Box(Modifier.width(cellWidth).height(48.dp).padding(2.dp)
+                        Box(Modifier.width(cellWidth).height(38.dp).padding(1.dp)
                             .background(when {
                                 correct -> Color(0xFFB5E1C1)
                                 active -> Color(0xFF9EC6F2)
